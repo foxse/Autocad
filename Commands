@@ -1,0 +1,347 @@
+        [CommandMethod("TFMS")]
+        static public void TableFromMetalSpec()
+        {
+            const string dlName = "MetalSpec";
+
+            var json = File.ReadAllText(Environment.GetEnvironmentVariable("TEMP") + @"\metalSpec_sd.json");
+
+            var tempSheetData =
+                JsonConvert.DeserializeObject<SortedDictionary<string, int>>(json);
+
+            var fileName = tempSheetData.Where(s => s.Key.Contains("_SPEC_FILE_PATH_")).First().Key.Replace("_SPEC_FILE_PATH_", "");
+
+            var sheetData = tempSheetData.Where(s => !s.Key.Contains("_SPEC_FILE_PATH_")).ToList();
+
+            var doc =
+              Application.DocumentManager.MdiActiveDocument;
+            var db = doc.Database;
+            var ed = doc.Editor;
+
+            // Ask the user to select an XLS(X) file
+
+            //var ofd =
+            //  new OpenFileDialog(
+            //    "Select Excel spreadsheet to link",
+            //    null,
+            //    "xls; xlsx; xlsm",
+            //    "Файл Excel для связи",
+            //    OpenFileDialog.OpenFileDialogFlags.
+            //      DoNotTransferRemoteFiles
+            //  );
+
+            //var dr = ofd.ShowDialog();
+
+            //if (dr != System.Windows.Forms.DialogResult.OK)
+            //    return;
+
+            if (!File.Exists(fileName))
+                return;
+
+            // Display the name of the file and the contained sheets
+
+            ed.WriteMessage(
+              "\nВыбранный файл \"{0}\" содержал листы:",
+              //ofd.Filename
+              fileName
+            );
+
+            // First we get the sheet names
+
+            var sheetNames = GetSheetNames(fileName/*ofd.Filename*/);
+
+            if (sheetNames.Count == 0)
+            {
+                ed.WriteMessage(
+                  "\nВ книге нет листов."
+                );
+                return;
+            }
+
+            // And loop through, printing their names
+
+            for (int i = 0; i < sheetNames.Count; i++)
+            {
+                var name = sheetNames[i];
+
+                ed.WriteMessage("\n{0} - {1}", i + 1, name);
+            }
+
+            var ppr = ed.GetPoint("\nУкажите точку вставки таблицы");
+            if (ppr.Status != PromptStatus.OK)
+                return;
+            string firstCell = "A1";
+            int lim = 4;
+            try
+            {
+                // Remove any Data Link, if one exists already
+                ObjectId newTableId;
+                var dlm = db.DataLinkManager;
+
+                Autodesk.AutoCAD.Geometry.Point3d pos = ppr.Value;
+
+                // Create and add the new Data Link, this time with
+                // a direction connection to the selected sheet
+                foreach (var sheet in sheetData)
+                {
+                    var dlId = dlm.GetDataLink(dlName + " " + sheet.Key);
+                    if (dlId != ObjectId.Null)
+                    {
+                        dlm.RemoveDataLink(dlId);
+                    }
+
+                    var dl = new DataLink();
+                    dl.DataAdapterId = "AcExcel";
+                    dl.Name = dlName + " " + sheet.Key;
+                    dl.Description = "";
+                    dl.ConnectionString =
+                      fileName +
+                      "!" + sheet.Key +
+                      ((sheet.Value == 0) ? "" : "!"+ firstCell + ":" + "S" + sheet.Value);
+                    dl.DataLinkOption = DataLinkOption.PersistCache;
+                    dl.UpdateOption |= (int)UpdateOption.AllowSourceUpdate;
+
+                    dlId = dlm.AddDataLink(dl);
+
+                    using (var tr = doc.TransactionManager.StartTransaction())
+                    {
+                        tr.AddNewlyCreatedDBObject(dl, true);
+
+                        var bt =
+                          (BlockTable)tr.GetObject(
+                            db.BlockTableId,
+                            OpenMode.ForRead
+                          );
+
+                        DBDictionary sd =
+                           (DBDictionary)tr.GetObject(
+                             db.TableStyleDictionaryId,
+                             OpenMode.ForRead
+                           );
+
+                        // Use the style if it already exists
+                        ObjectId tsId = ObjectId.Null;
+
+                        // Create our table
+
+                        var tb = new Table();
+
+                        if (sd.Contains("ROM35"))
+                        {
+                            tsId = sd.GetAt("ROM35");
+                            tb.TableStyle = tsId;
+                        }
+                        else
+                        {
+                            TextStyleTable newTextStyleTable = tr.GetObject(doc.Database.TextStyleTableId, OpenMode.ForRead) as TextStyleTable;
+
+                            if (!newTextStyleTable.Has("ROM35"))  //The TextStyle is currently not in the database
+                            {
+                                newTextStyleTable.UpgradeOpen();
+                                var newTextStyleTableRecord = new TextStyleTableRecord();
+                                newTextStyleTableRecord.FileName = "romans.shx";
+                                newTextStyleTableRecord.Name = "ROM35";
+                                newTextStyleTableRecord.XScale = 0.8;
+                                newTextStyleTableRecord.TextSize = 3.5;
+                                //Autodesk.AutoCAD.GraphicsInterface.FontDescriptor myNewTextStyle = new Autodesk.AutoCAD.GraphicsInterface.FontDescriptor("ROMANS", false, false, 0, 0);
+                                //newTextStyleTableRecord.Font = myNewTextStyle;
+                                newTextStyleTable.Add(newTextStyleTableRecord);
+                                tr.AddNewlyCreatedDBObject(newTextStyleTableRecord, true);
+                            }
+
+                            // Otherwise we have to create it
+                            TableStyle ts = new TableStyle();
+                            #region Тут всякие цвета - шрифты
+
+
+                            // With yellow text everywhere (yeuch :-)
+
+                            ts.SetColor(
+                              Color.FromColorIndex(ColorMethod.ByAci, 2),
+                              (int)(RowType.TitleRow |
+                                    RowType.HeaderRow |
+                                    RowType.DataRow)
+                            );
+
+                            // And now with magenta outer grid-lines
+
+                            ts.SetGridColor(
+                              Color.FromColorIndex(ColorMethod.ByAci, 6),
+                              (int)GridLineType.OuterGridLines,
+                              (int)(RowType.TitleRow |
+                                    RowType.HeaderRow |
+                                    RowType.DataRow)
+                            );
+
+                            // And red inner grid-lines
+
+                            ts.SetGridColor(
+                              Color.FromColorIndex(ColorMethod.ByAci, 1),
+                              (int)GridLineType.InnerGridLines,
+                              (int)(RowType.TitleRow |
+                                    RowType.HeaderRow |
+                                    RowType.DataRow)
+                            );
+
+                            if (newTextStyleTable.Has("ROM35"))
+                            // And we'll make the grid-lines nice and chunky
+                            {
+                                ts.SetTextStyle(newTextStyleTable["ROM35"], (int)RowType.TitleRow); // title row 
+                                ts.SetTextStyle(newTextStyleTable["ROM35"], (int)RowType.HeaderRow); // header row 
+                                ts.SetTextStyle(newTextStyleTable["ROM35"], (int)RowType.DataRow); // data row 
+                            }
+                            // Add our table style to the dictionary
+                            //  and to the transaction
+                            #endregion 
+                            tsId = ts.PostTableStyleToDatabase(db, "ROM35");
+                            tr.AddNewlyCreatedDBObject(ts, true);
+                        }
+
+                        tb.Position = pos;
+                        tb.Cells.SetDataLink(dlId, true);
+                        tb.GenerateLayout();
+
+                        double w = tb.Width;
+                        double h = tb.Height;
+                        tb.Width = 340;
+                        // Table Height
+                        if (lim == 4)
+                            tb.Height = 8 + 22 + 4 + 8 * sheet.Value;
+                        else
+                            tb.Height = 14 + 4 + 8 * sheet.Value;
+                        // Add it to the drawing
+
+                        /* */
+
+                        var btr =
+                          (BlockTableRecord)tr.GetObject(
+                            db.CurrentSpaceId,
+                            OpenMode.ForWrite
+                          );
+
+                        btr.AppendEntity(tb);
+                        tr.AddNewlyCreatedDBObject(tb, true);
+                        newTableId = tb.ObjectId;
+                        tb.Cells.ClearStyleOverrides();
+                        tb.TableStyle = sd.GetAt("ROM35");
+                        tb.RemoveDataLink();
+                        tb.UpgradeOpen();
+
+                        for (int c = 0; c < tb.Columns.Count; c++)
+                        {
+                            if (c < 3)
+                            {
+                                tb.Columns[c].Width = 30;
+                            }
+                            else if (c == 3)
+                            {
+                                tb.Columns[c].Width = 10;
+                            }
+                            else if (c != tb.Columns.Count - 1)
+                            {
+                                tb.Columns[c].Width = 15;
+                            }
+                            else
+                            {
+                                tb.Columns[c].Width = 25;
+                            }
+                        }
+
+                        using (var mt = new MText())
+                        {
+                            for (int r = 0; r < tb.Rows.Count; r++)
+                            {
+                                tb.Rows[r].Height = 8;
+                                for (int c = 0; c < tb.Columns.Count; c++)
+                                {
+                                    // Get the cell and its contents
+                                    var cell = tb.Cells[r, c];
+                                    mt.Contents = cell.TextString;
+                                    mt.Height = 3.5;
+                                    cell.ContentColor = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                    cell.TextHeight = 3.5;
+                                    cell.Alignment = CellAlignment.MiddleCenter;
+                                    if (r < lim )
+                                    {
+                                        cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                        cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                    }
+                                    else
+                                    {
+                                        if (tb.Cells[cell.Row, 1].TextString.Contains("Итого"))
+                                        {
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                            cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                            if (c > 3)
+                                                cell.ContentColor = Color.FromColorIndex(ColorMethod.ByColor, 3);
+                                        }
+                                        else if (tb.Cells[cell.Row, 0].TextString.Contains("Всего масса металла") ||
+                                            tb.Cells[cell.Row, 0].TextString.Contains("B том числе по маркам"))
+                                        {
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                            cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                            if (c > 3)
+                                                cell.ContentColor = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                        }
+                                        else if (tb.Cells[cell.Row, 0].TextString.Contains("Всего профиля"))
+                                        {
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                            cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                            if (c > 3)
+                                                cell.ContentColor = Color.FromColorIndex(ColorMethod.ByColor, 5);
+                                        }
+                                        else if (tb.Cells[cell.Row - 1, 0].TextString.Contains("Всего профиля"))
+                                        {
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 1);
+                                            cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                        }
+                                        else if (tb.Cells[cell.Row - 1, 1].TextString.Contains("Итого"))
+                                        {
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                            cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                            if (c > 3)
+                                                cell.ContentColor = Color.FromColorIndex(ColorMethod.ByColor, 3);
+                                        }
+                                        else
+                                        {
+                                            if (tb.Cells[cell.Row - 1, 1].TextString.Contains("Итого"))
+                                            {
+                                                cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 2);
+                                            }
+                                            else
+                                            {
+                                                cell.Borders.Top.Color = Color.FromColorIndex(ColorMethod.ByColor, 1);
+                                            }
+                                            cell.Borders.Bottom.Color = Color.FromColorIndex(ColorMethod.ByColor, 1);
+                                            
+                                        }
+                                    }
+                                    
+                                    cell.Borders.Left.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                    cell.Borders.Right.Color = Color.FromColorIndex(ColorMethod.ByColor, 6);
+                                    //tb.Cells[r, c].Style = "_HEADER";
+                                    //cell.Style = "_HEADER";
+
+                                    mt.Contents = @"{\W0.75;" + mt.Text + "}";
+                                    mt.Width = tb.Columns[c].Width;
+                                    // Explode the text fragments
+                                    cell.TextString = mt.Contents;
+                                    
+                                }
+                            }
+                        }
+                        if (firstCell == "A1")
+                            tb.Rows[1].Height = 55.0;
+                        pos = new Autodesk.AutoCAD.Geometry.Point3d(new double[] { pos.X + tb.Width + 20, pos.Y, pos.Z });
+                        tb.DowngradeOpen();
+                        tr.Commit();
+                    }
+                    firstCell = "A3";
+                    lim = 2;
+                }
+
+            }
+            catch (Autodesk.AutoCAD.Runtime.Exception ex)
+            {
+                ed.WriteMessage("\nИсключение: {0}", ex.Message);
+            }
+        }
